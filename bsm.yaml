@@ -1,0 +1,1793 @@
+---
+type: PostgresConfig
+api_version: store/v1
+metadata:
+  created_by: admin
+  labels:
+    sensu.io/managed_by: sensuctl
+  name: postgres
+spec:
+  batch_buffer: 0
+  batch_size: 0
+  batch_workers: 0
+  dsn: postgresql://sensu:teenspirit@db:5432/sensu_events?sslmode=disable
+  enable_round_robin: false
+  max_conn_lifetime: ""
+  max_idle_conns: null
+  pool_size: 20
+  strict: false
+---
+type: Env
+api_version: secrets/v1
+metadata:
+  name: env
+spec: {}
+---
+type: RuleTemplate
+api_version: bsm/v1
+metadata:
+  name: aggregate
+  namespace: default
+spec:
+  arguments:
+    properties:
+      critical_count:
+        description: create an event with a critical status if there the number of
+          critical events is equal to or greater than this count
+        type: number
+      critical_threshold:
+        description: create an event with a critical status if the percentage of non-zero
+          events is equal to or greater than this threshold
+        type: number
+      metric_handlers:
+        default: {}
+        description: metric handlers to use for produced metrics
+        items:
+          type: string
+        type: array
+      produce_metrics:
+        default: {}
+        description: produce metrics from aggregate data and include them in the produced
+          event
+        type: boolean
+      set_metric_annotations:
+        default: {}
+        description: annotate the produced event with metric annotations
+        type: boolean
+      warning_count:
+        description: create an event with a warning status if there the number of
+          critical events is equal to or greater than this count
+        type: number
+      warning_threshold:
+        description: create an event with a warning status if the percentage of non-zero
+          events is equal to or greater than this threshold
+        type: number
+    required: null
+  description: Monitor a distributed service - aggregate one or more events into a
+    single event. This BSM rule template allows you to treat the results of multiple
+    disparate check executions – executed across multiple disparate systems – as a
+    single event. This template is extremely useful in dynamic environments and/or
+    environments that have a reasonable tolerance for failure. Use this template when
+    a service can be considered healthy as long as a minimum threshold is satisfied
+    (e.g. at least 5 healthy web servers? at least 70% of N processes healthy?).
+  eval: |2
+
+    if (events && events.length == 0) {
+        event.check.output = "WARNING: No events selected for aggregate\n";
+        event.check.status = 1;
+        return event;
+    }
+
+    event.annotations["io.sensu.bsm.selected_event_count"] = events.length;
+
+    percentOK = sensu.PercentageBySeverity("ok");
+
+    if (!!args["produce_metrics"]) {
+        var ts = Math.floor(new Date().getTime() / 1000);
+
+        event.timestamp = ts;
+
+        var tags = [
+            {
+                name: "service",
+                value: event.entity.name
+            },
+            {
+                name: "entity",
+                value: event.entity.name
+            },
+            {
+                name: "check",
+                value: event.check.name
+            }
+        ];
+
+        event.metrics = sensu.NewMetrics({
+            points: [
+                {
+                    name: "percent_non_zero",
+                    timestamp: ts,
+                    value: sensu.PercentageBySeverity("non-zero"),
+                    tags: tags
+                },
+                {
+                    name: "percent_ok",
+                    timestamp: ts,
+                    value: percentOK,
+                    tags: tags
+                },
+                {
+                    name: "percent_warning",
+                    timestamp: ts,
+                    value: sensu.PercentageBySeverity("warning"),
+                    tags: tags
+                },
+                {
+                    name: "percent_critical",
+                    timestamp: ts,
+                    value: sensu.PercentageBySeverity("critical"),
+                    tags: tags
+                },
+                {
+                    name: "percent_unknown",
+                    timestamp: ts,
+                    value: sensu.PercentageBySeverity("unknown"),
+                    tags: tags
+                },
+                {
+                    name: "count_non_zero",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("non-zero"),
+                    tags: tags
+                },
+                {
+                    name: "count_ok",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("ok"),
+                    tags: tags
+                },
+                {
+                    name: "count_warning",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("warning"),
+                    tags: tags
+                },
+                {
+                    name: "count_critical",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("critical"),
+                    tags: tags
+                },
+                {
+                    name: "count_unknown",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("unknown"),
+                    tags: tags
+                }
+            ]
+        });
+
+        if (!!args["metric_handlers"]) {
+            event.metrics.handlers = args["metric_handlers"].slice();
+        }
+
+        if (!!args["set_metric_annotations"]) {
+            var i = 0;
+
+            while(i < event.metrics.points.length) {
+                event.annotations["io.sensu.bsm.selected_event_" + event.metrics.points[i].name] = event.metrics.points[i].value.toString();
+                i++;
+            }
+        }
+    }
+
+    if (!!args["critical_threshold"] && percentOK <= args["critical_threshold"]) {
+        event.check.output = "CRITICAL: Less than " + args["critical_threshold"].toString() + "% of selected events are OK (" + percentOK.toString() + "%)\n";
+        event.check.status = 2;
+        return event;
+    }
+
+    if (!!args["warning_threshold"] && percentOK <= args["warning_threshold"]) {
+        event.check.output = "WARNING: Less than " + args["warning_threshold"].toString() + "% of selected events are OK (" + percentOK.toString() + "%)\n";
+        event.check.status = 1;
+        return event;
+    }
+
+    if (!!args["critical_count"]) {
+        crit = sensu.CountBySeverity("critical");
+
+        if (crit >= args["critical_count"]) {
+            event.check.output = "CRITICAL: " + args["critical_count"].toString() + " or more selected events are in a critical state (" + crit.toString() + ")\n";
+            event.check.status = 2;
+            return event;
+        }
+    }
+
+    if (!!args["warning_count"]) {
+        warn = sensu.CountBySeverity("warning");
+
+        if (warn >= args["warning_count"]) {
+            event.check.output = "WARNING: " + args["warning_count"].toString() + " or more selected events are in a warning state (" + warn.toString() + ")\n";
+            event.check.status = 1;
+            return event;
+        }
+    }
+
+    event.check.output = "Everything looks good (" + percentOK.toString() + "% OK)";
+    event.check.status = 0;
+
+    return event;
+---
+type: ServiceComponent
+api_version: bsm/v1
+metadata:
+  created_by: admin
+  name: bsmDemoComponent
+  namespace: default
+spec:
+  cron: ""
+  handlers: null
+  interval: 46
+  query:
+  - type: fieldSelector
+    value: event.entity.subscriptions matches "docker"
+  rules:
+  - arguments:
+      critical_threshold: 70
+      warning_count: 1
+    name: bsmDemoAggRule
+    template: aggregate
+  services:
+  - bsm-demo
+---
+type: Namespace
+api_version: core/v2
+metadata:
+  name: default
+spec:
+  name: default
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: admin
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - assets
+    - checks
+    - entities
+    - extensions
+    - events
+    - filters
+    - handlers
+    - hooks
+    - mutators
+    - silenced
+    - roles
+    - rolebindings
+    verbs:
+    - '*'
+  - resource_names: null
+    resources:
+    - namespaces
+    verbs:
+    - get
+    - list
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: cluster-admin
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - '*'
+    verbs:
+    - '*'
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: edit
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - assets
+    - checks
+    - entities
+    - extensions
+    - events
+    - filters
+    - handlers
+    - hooks
+    - mutators
+    - silenced
+    verbs:
+    - '*'
+  - resource_names: null
+    resources:
+    - namespaces
+    verbs:
+    - get
+    - list
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: system:agent
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - events
+    verbs:
+    - '*'
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: system:user
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - localselfuser
+    verbs:
+    - get
+    - update
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: view
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - assets
+    - checks
+    - entities
+    - extensions
+    - events
+    - filters
+    - handlers
+    - hooks
+    - mutators
+    - silenced
+    - namespaces
+    verbs:
+    - get
+    - list
+---
+type: ClusterRoleBinding
+api_version: core/v2
+metadata:
+  name: cluster-admin
+spec:
+  role_ref:
+    name: cluster-admin
+    type: ClusterRole
+  subjects:
+  - name: cluster-admins
+    type: Group
+---
+type: ClusterRoleBinding
+api_version: core/v2
+metadata:
+  name: system:agent
+spec:
+  role_ref:
+    name: system:agent
+    type: ClusterRole
+  subjects:
+  - name: system:agents
+    type: Group
+---
+type: ClusterRoleBinding
+api_version: core/v2
+metadata:
+  name: system:user
+spec:
+  role_ref:
+    name: system:user
+    type: ClusterRole
+  subjects:
+  - name: system:users
+    type: Group
+---
+type: User
+api_version: core/v2
+metadata:
+  name: admin
+spec:
+  disabled: false
+  groups:
+  - cluster-admins
+  username: admin
+---
+type: User
+api_version: core/v2
+metadata:
+  name: agent
+spec:
+  disabled: false
+  groups:
+  - system:agents
+  username: agent
+---
+type: TessenConfig
+api_version: core/v2
+metadata: {}
+spec:
+  opt_out: false
+---
+type: CheckConfig
+api_version: core/v2
+metadata:
+  created_by: admin
+  name: bsmDemo
+  namespace: default
+spec:
+  check_hooks: null
+  command: echo "leggo my bsm"
+  env_vars: null
+  handlers: []
+  high_flap_threshold: 0
+  interval: 60
+  low_flap_threshold: 0
+  output_metric_format: ""
+  output_metric_handlers: null
+  proxy_entity_name: bsmProxy
+  publish: true
+  round_robin: false
+  runtime_assets: null
+  secrets: null
+  stdin: false
+  subdue: null
+  subscriptions:
+  - docker
+  timeout: 0
+  ttl: 0
+---
+type: Entity
+api_version: core/v2
+metadata:
+  created_by: admin
+  name: bsm-demo
+  namespace: default
+spec:
+  deregister: false
+  deregistration: {}
+  entity_class: service
+  last_seen: 0
+  sensu_agent_version: ""
+  subscriptions: null
+  system:
+    cloud_provider: ""
+    libc_type: ""
+    network:
+      interfaces: null
+    processes: null
+    vm_role: ""
+    vm_system: ""
+---
+type: Entity
+api_version: core/v2
+metadata:
+  name: bsmProxy
+  namespace: default
+spec:
+  deregister: false
+  deregistration: {}
+  entity_class: proxy
+  last_seen: 0
+  sensu_agent_version: ""
+  subscriptions:
+  - entity:bsmProxy
+  - docker
+  system:
+    cloud_provider: ""
+    libc_type: ""
+    network:
+      interfaces: null
+    processes: null
+    vm_role: ""
+    vm_system: ""
+---
+type: Entity
+api_version: core/v2
+metadata:
+  created_by: admin
+  name: demo2
+  namespace: default
+spec:
+  deregister: false
+  deregistration: {}
+  entity_class: service
+  last_seen: 0
+  sensu_agent_version: ""
+  subscriptions: null
+  system:
+    cloud_provider: ""
+    libc_type: ""
+    network:
+      interfaces: null
+    processes: null
+    vm_role: ""
+    vm_system: ""
+---
+type: Entity
+api_version: core/v2
+metadata:
+  name: sensu-agent
+  namespace: default
+spec:
+  deregister: false
+  deregistration: {}
+  entity_class: agent
+  last_seen: 1628889082
+  redact:
+  - password
+  - passwd
+  - pass
+  - api_key
+  - api_token
+  - access_key
+  - secret_key
+  - private_key
+  - secret
+  sensu_agent_version: 6.4.0
+  subscriptions:
+  - dev
+  - poller
+  - system
+  - linux
+  - docker
+  - entity:sensu-agent
+  system:
+    arch: amd64
+    cloud_provider: ""
+    hostname: sensu-agent
+    libc_type: musl
+    network:
+      interfaces:
+      - addresses:
+        - 127.0.0.1/8
+        name: lo
+      - addresses: null
+        name: tunl0
+      - addresses: null
+        name: ip6tnl0
+      - addresses:
+        - 172.19.0.5/16
+        mac: 02:42:ac:13:00:05
+        name: eth0
+    os: linux
+    platform: alpine
+    platform_family: alpine
+    platform_version: 3.12.7
+    processes: null
+    vm_role: guest
+    vm_system: docker
+  user: agent
+---
+type: Entity
+api_version: core/v2
+metadata:
+  name: sensu-rhel-agent
+  namespace: default
+spec:
+  deregister: true
+  deregistration: {}
+  entity_class: agent
+  last_seen: 1628889073
+  redact:
+  - password
+  - passwd
+  - pass
+  - api_key
+  - api_token
+  - access_key
+  - secret_key
+  - private_key
+  - secret
+  sensu_agent_version: 6.2.7
+  subscriptions:
+  - dev
+  - poller
+  - system
+  - linux
+  - docker
+  - entity:sensu-rhel-agent
+  system:
+    arch: amd64
+    cloud_provider: ""
+    hostname: sensu-rhel-agent
+    libc_type: glibc
+    network:
+      interfaces:
+      - addresses:
+        - 127.0.0.1/8
+        name: lo
+      - addresses: null
+        name: tunl0
+      - addresses: null
+        name: ip6tnl0
+      - addresses:
+        - 172.19.0.4/16
+        mac: 02:42:ac:13:00:04
+        name: eth0
+    os: linux
+    platform: redhat
+    platform_family: rhel
+    platform_version: "7.9"
+    processes: null
+    vm_role: guest
+    vm_system: docker
+  user: agent
+---
+type: Event
+api_version: core/v2
+metadata:
+  annotations:
+    io.sensu.bsm.selected_event_count: "3"
+  labels:
+    io.sensu.bsm.component: bsmDemoComponent
+    io.sensu.bsm.rule: bsmDemoAggRule
+  namespace: default
+spec:
+  check:
+    check_hooks: null
+    env_vars: null
+    executed: 1628889070
+    handlers: []
+    high_flap_threshold: 0
+    history:
+    - executed: 1628884264
+      status: 0
+    - executed: 1628884310
+      status: 0
+    - executed: 1628884356
+      status: 0
+    - executed: 1628884402
+      status: 0
+    - executed: 1628884448
+      status: 0
+    - executed: 1628884494
+      status: 0
+    - executed: 1628884540
+      status: 0
+    - executed: 1628884586
+      status: 0
+    - executed: 1628884633
+      status: 0
+    - executed: 1628884679
+      status: 0
+    - executed: 1628884725
+      status: 0
+    - executed: 1628884771
+      status: 0
+    - executed: 1628884817
+      status: 0
+    - executed: 1628884863
+      status: 0
+    - executed: 1628884909
+      status: 0
+    - executed: 1628884955
+      status: 0
+    - executed: 1628886791
+      status: 0
+    - executed: 1628888932
+      status: 0
+    - executed: 1628888978
+      status: 0
+    - executed: 1628889024
+      status: 0
+    - executed: 1628889070
+      status: 0
+    interval: 46
+    is_silenced: false
+    issued: 1628889070
+    last_ok: 1628889070
+    low_flap_threshold: 0
+    metadata:
+      name: bsmDemoComponent-bsmDemoAggRule
+      namespace: default
+    occurrences: 90
+    occurrences_watermark: 90
+    output: Everything looks good (100% OK)
+    output_metric_format: ""
+    output_metric_handlers: null
+    proxy_entity_name: ""
+    publish: false
+    round_robin: false
+    runtime_assets: null
+    scheduler: ""
+    secrets: null
+    state: passing
+    status: 0
+    stdin: false
+    subdue: null
+    subscriptions: []
+    timeout: 0
+    total_state_change: 0
+    ttl: 0
+  entity:
+    deregister: false
+    deregistration: {}
+    entity_class: service
+    last_seen: 0
+    metadata:
+      created_by: admin
+      name: bsm-demo
+      namespace: default
+    sensu_agent_version: ""
+    subscriptions: null
+    system:
+      cloud_provider: ""
+      libc_type: ""
+      network:
+        interfaces: null
+      processes: null
+      vm_role: ""
+      vm_system: ""
+  id: cb720b14-a8b5-497a-a2f7-bb1e0e1525b3
+  sequence: 0
+  timestamp: 1628889070
+---
+type: Event
+api_version: core/v2
+metadata:
+  namespace: default
+spec:
+  check:
+    check_hooks: null
+    command: echo "leggo my bsm"
+    duration: 0.0006944
+    env_vars: null
+    executed: 1628889080
+    handlers: []
+    high_flap_threshold: 0
+    history:
+    - executed: 1628884597
+      status: 0
+    - executed: 1628884657
+      status: 0
+    - executed: 1628884657
+      status: 0
+    - executed: 1628884717
+      status: 0
+    - executed: 1628884717
+      status: 0
+    - executed: 1628884777
+      status: 0
+    - executed: 1628884777
+      status: 0
+    - executed: 1628884837
+      status: 0
+    - executed: 1628884837
+      status: 0
+    - executed: 1628884897
+      status: 0
+    - executed: 1628884897
+      status: 0
+    - executed: 1628884956
+      status: 0
+    - executed: 1628884956
+      status: 0
+    - executed: 1628886806
+      status: 0
+    - executed: 1628886806
+      status: 0
+    - executed: 1628888960
+      status: 0
+    - executed: 1628888960
+      status: 0
+    - executed: 1628889020
+      status: 0
+    - executed: 1628889020
+      status: 0
+    - executed: 1628889080
+      status: 0
+    - executed: 1628889080
+      status: 0
+    interval: 60
+    is_silenced: false
+    issued: 1628889080
+    last_ok: 1628889080
+    low_flap_threshold: 0
+    metadata:
+      name: bsmDemo
+      namespace: default
+    occurrences: 461
+    occurrences_watermark: 461
+    output: |
+      leggo my bsm
+    output_metric_format: ""
+    output_metric_handlers: null
+    proxy_entity_name: bsmProxy
+    publish: true
+    round_robin: false
+    runtime_assets: null
+    scheduler: etcd
+    secrets: null
+    state: passing
+    status: 0
+    stdin: false
+    subdue: null
+    subscriptions:
+    - docker
+    timeout: 0
+    total_state_change: 0
+    ttl: 0
+  entity:
+    deregister: false
+    deregistration: {}
+    entity_class: proxy
+    last_seen: 0
+    metadata:
+      name: bsmProxy
+      namespace: default
+    sensu_agent_version: ""
+    subscriptions:
+    - entity:bsmProxy
+    - docker
+    system:
+      cloud_provider: ""
+      libc_type: ""
+      network:
+        interfaces: null
+      processes: null
+      vm_role: ""
+      vm_system: ""
+  id: 1ac6fbda-7298-4678-a841-887bdf93614a
+  sequence: 70
+  timestamp: 1628889080
+---
+type: Event
+api_version: core/v2
+metadata:
+  namespace: default
+spec:
+  check:
+    check_hooks: null
+    env_vars: null
+    executed: 1628889082
+    handlers:
+    - keepalive
+    high_flap_threshold: 0
+    history:
+    - executed: 1628884799
+      status: 0
+    - executed: 1628884819
+      status: 0
+    - executed: 1628884839
+      status: 0
+    - executed: 1628884859
+      status: 0
+    - executed: 1628884879
+      status: 0
+    - executed: 1628884899
+      status: 0
+    - executed: 1628884919
+      status: 0
+    - executed: 1628884939
+      status: 0
+    - executed: 1628884959
+      status: 0
+    - executed: 1628886768
+      status: 0
+    - executed: 1628886788
+      status: 0
+    - executed: 1628886808
+      status: 0
+    - executed: 1628888922
+      status: 0
+    - executed: 1628888942
+      status: 0
+    - executed: 1628888962
+      status: 0
+    - executed: 1628888982
+      status: 0
+    - executed: 1628889002
+      status: 0
+    - executed: 1628889022
+      status: 0
+    - executed: 1628889042
+      status: 0
+    - executed: 1628889062
+      status: 0
+    - executed: 1628889082
+      status: 0
+    interval: 20
+    is_silenced: false
+    issued: 1628889082
+    last_ok: 1628889082
+    low_flap_threshold: 0
+    metadata:
+      name: keepalive
+      namespace: default
+    occurrences: 209
+    occurrences_watermark: 209
+    output: Keepalive last sent from sensu-agent at 2021-08-13 21:11:22 +0000 UTC
+    output_metric_format: ""
+    output_metric_handlers: null
+    proxy_entity_name: ""
+    publish: false
+    round_robin: false
+    runtime_assets: null
+    scheduler: etcd
+    secrets: null
+    state: passing
+    status: 0
+    stdin: false
+    subdue: null
+    subscriptions: []
+    timeout: 120
+    total_state_change: 0
+    ttl: 0
+  entity:
+    deregister: false
+    deregistration: {}
+    entity_class: agent
+    last_seen: 1628889082
+    metadata:
+      name: sensu-agent
+      namespace: default
+    redact:
+    - password
+    - passwd
+    - pass
+    - api_key
+    - api_token
+    - access_key
+    - secret_key
+    - private_key
+    - secret
+    sensu_agent_version: 6.4.0
+    subscriptions:
+    - dev
+    - poller
+    - system
+    - linux
+    - docker
+    - entity:sensu-agent
+    system:
+      arch: amd64
+      cloud_provider: ""
+      hostname: sensu-agent
+      libc_type: musl
+      network:
+        interfaces:
+        - addresses:
+          - 127.0.0.1/8
+          name: lo
+        - addresses: null
+          name: tunl0
+        - addresses: null
+          name: ip6tnl0
+        - addresses:
+          - 172.19.0.5/16
+          mac: 02:42:ac:13:00:05
+          name: eth0
+      os: linux
+      platform: alpine
+      platform_family: alpine
+      platform_version: 3.12.7
+      processes: null
+      vm_role: guest
+      vm_system: docker
+    user: agent
+  id: 2dc8d250-2ed8-428d-855a-a2c13b897115
+  sequence: 209
+  timestamp: 1628889082
+---
+type: Event
+api_version: core/v2
+metadata:
+  namespace: default
+spec:
+  check:
+    check_hooks: null
+    env_vars: null
+    executed: 1628889073
+    handlers:
+    - keepalive
+    high_flap_threshold: 0
+    history:
+    - executed: 1628884790
+      status: 0
+    - executed: 1628884810
+      status: 0
+    - executed: 1628884830
+      status: 0
+    - executed: 1628884850
+      status: 0
+    - executed: 1628884870
+      status: 0
+    - executed: 1628884890
+      status: 0
+    - executed: 1628884910
+      status: 0
+    - executed: 1628884930
+      status: 0
+    - executed: 1628884951
+      status: 0
+    - executed: 1628884970
+      status: 0
+    - executed: 1628886780
+      status: 0
+    - executed: 1628886799
+      status: 0
+    - executed: 1628886819
+      status: 0
+    - executed: 1628888934
+      status: 0
+    - executed: 1628888954
+      status: 0
+    - executed: 1628888974
+      status: 0
+    - executed: 1628888993
+      status: 0
+    - executed: 1628889013
+      status: 0
+    - executed: 1628889033
+      status: 0
+    - executed: 1628889053
+      status: 0
+    - executed: 1628889073
+      status: 0
+    interval: 20
+    is_silenced: false
+    issued: 1628889073
+    last_ok: 1628889073
+    low_flap_threshold: 0
+    metadata:
+      name: keepalive
+      namespace: default
+    occurrences: 737
+    occurrences_watermark: 737
+    output: Keepalive last sent from sensu-rhel-agent at 2021-08-13 21:11:13 +0000
+      UTC
+    output_metric_format: ""
+    output_metric_handlers: null
+    proxy_entity_name: ""
+    publish: false
+    round_robin: false
+    runtime_assets: null
+    scheduler: etcd
+    secrets: null
+    state: passing
+    status: 0
+    stdin: false
+    subdue: null
+    subscriptions: []
+    timeout: 120
+    total_state_change: 0
+    ttl: 0
+  entity:
+    deregister: true
+    deregistration: {}
+    entity_class: agent
+    last_seen: 1628889073
+    metadata:
+      name: sensu-rhel-agent
+      namespace: default
+    redact:
+    - password
+    - passwd
+    - pass
+    - api_key
+    - api_token
+    - access_key
+    - secret_key
+    - private_key
+    - secret
+    sensu_agent_version: 6.2.7
+    subscriptions:
+    - dev
+    - poller
+    - system
+    - linux
+    - docker
+    - entity:sensu-rhel-agent
+    system:
+      arch: amd64
+      cloud_provider: ""
+      hostname: sensu-rhel-agent
+      libc_type: glibc
+      network:
+        interfaces:
+        - addresses:
+          - 127.0.0.1/8
+          name: lo
+        - addresses: null
+          name: tunl0
+        - addresses: null
+          name: ip6tnl0
+        - addresses:
+          - 172.19.0.4/16
+          mac: 02:42:ac:13:00:04
+          name: eth0
+      os: linux
+      platform: redhat
+      platform_family: rhel
+      platform_version: "7.9"
+      processes: null
+      vm_role: guest
+      vm_system: docker
+    user: agent
+  id: 068afa9d-e658-42ef-9d96-8ac3a9f8b9d4
+  sequence: 503
+  timestamp: 1628889073
+---
+type: Role
+api_version: core/v2
+metadata:
+  name: system:pipeline
+  namespace: default
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - events
+    verbs:
+    - get
+    - list
+---
+type: RoleBinding
+api_version: core/v2
+metadata:
+  name: system:pipeline
+  namespace: default
+spec:
+  role_ref:
+    name: system:pipeline
+    type: Role
+  subjects:
+  - name: system:pipeline
+    type: Group
+/ # sensuctl dump all --all-namespaces --omit core/v2.APIKey,core/v2.User --format yaml --file bsm.yml
+/ # cat bsm.yml 
+---
+type: PostgresConfig
+api_version: store/v1
+metadata:
+  created_by: admin
+  labels:
+    sensu.io/managed_by: sensuctl
+  name: postgres
+spec:
+  batch_buffer: 0
+  batch_size: 0
+  batch_workers: 0
+  dsn: postgresql://sensu:teenspirit@db:5432/sensu_events?sslmode=disable
+  enable_round_robin: false
+  max_conn_lifetime: ""
+  max_idle_conns: null
+  pool_size: 20
+  strict: false
+---
+type: Env
+api_version: secrets/v1
+metadata:
+  name: env
+spec: {}
+---
+type: RuleTemplate
+api_version: bsm/v1
+metadata:
+  name: aggregate
+  namespace: default
+spec:
+  arguments:
+    properties:
+      critical_count:
+        description: create an event with a critical status if there the number of
+          critical events is equal to or greater than this count
+        type: number
+      critical_threshold:
+        description: create an event with a critical status if the percentage of non-zero
+          events is equal to or greater than this threshold
+        type: number
+      metric_handlers:
+        default: {}
+        description: metric handlers to use for produced metrics
+        items:
+          type: string
+        type: array
+      produce_metrics:
+        default: {}
+        description: produce metrics from aggregate data and include them in the produced
+          event
+        type: boolean
+      set_metric_annotations:
+        default: {}
+        description: annotate the produced event with metric annotations
+        type: boolean
+      warning_count:
+        description: create an event with a warning status if there the number of
+          critical events is equal to or greater than this count
+        type: number
+      warning_threshold:
+        description: create an event with a warning status if the percentage of non-zero
+          events is equal to or greater than this threshold
+        type: number
+    required: null
+  description: Monitor a distributed service - aggregate one or more events into a
+    single event. This BSM rule template allows you to treat the results of multiple
+    disparate check executions – executed across multiple disparate systems – as a
+    single event. This template is extremely useful in dynamic environments and/or
+    environments that have a reasonable tolerance for failure. Use this template when
+    a service can be considered healthy as long as a minimum threshold is satisfied
+    (e.g. at least 5 healthy web servers? at least 70% of N processes healthy?).
+  eval: |2
+
+    if (events && events.length == 0) {
+        event.check.output = "WARNING: No events selected for aggregate\n";
+        event.check.status = 1;
+        return event;
+    }
+
+    event.annotations["io.sensu.bsm.selected_event_count"] = events.length;
+
+    percentOK = sensu.PercentageBySeverity("ok");
+
+    if (!!args["produce_metrics"]) {
+        var ts = Math.floor(new Date().getTime() / 1000);
+
+        event.timestamp = ts;
+
+        var tags = [
+            {
+                name: "service",
+                value: event.entity.name
+            },
+            {
+                name: "entity",
+                value: event.entity.name
+            },
+            {
+                name: "check",
+                value: event.check.name
+            }
+        ];
+
+        event.metrics = sensu.NewMetrics({
+            points: [
+                {
+                    name: "percent_non_zero",
+                    timestamp: ts,
+                    value: sensu.PercentageBySeverity("non-zero"),
+                    tags: tags
+                },
+                {
+                    name: "percent_ok",
+                    timestamp: ts,
+                    value: percentOK,
+                    tags: tags
+                },
+                {
+                    name: "percent_warning",
+                    timestamp: ts,
+                    value: sensu.PercentageBySeverity("warning"),
+                    tags: tags
+                },
+                {
+                    name: "percent_critical",
+                    timestamp: ts,
+                    value: sensu.PercentageBySeverity("critical"),
+                    tags: tags
+                },
+                {
+                    name: "percent_unknown",
+                    timestamp: ts,
+                    value: sensu.PercentageBySeverity("unknown"),
+                    tags: tags
+                },
+                {
+                    name: "count_non_zero",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("non-zero"),
+                    tags: tags
+                },
+                {
+                    name: "count_ok",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("ok"),
+                    tags: tags
+                },
+                {
+                    name: "count_warning",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("warning"),
+                    tags: tags
+                },
+                {
+                    name: "count_critical",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("critical"),
+                    tags: tags
+                },
+                {
+                    name: "count_unknown",
+                    timestamp: ts,
+                    value: sensu.CountBySeverity("unknown"),
+                    tags: tags
+                }
+            ]
+        });
+
+        if (!!args["metric_handlers"]) {
+            event.metrics.handlers = args["metric_handlers"].slice();
+        }
+
+        if (!!args["set_metric_annotations"]) {
+            var i = 0;
+
+            while(i < event.metrics.points.length) {
+                event.annotations["io.sensu.bsm.selected_event_" + event.metrics.points[i].name] = event.metrics.points[i].value.toString();
+                i++;
+            }
+        }
+    }
+
+    if (!!args["critical_threshold"] && percentOK <= args["critical_threshold"]) {
+        event.check.output = "CRITICAL: Less than " + args["critical_threshold"].toString() + "% of selected events are OK (" + percentOK.toString() + "%)\n";
+        event.check.status = 2;
+        return event;
+    }
+
+    if (!!args["warning_threshold"] && percentOK <= args["warning_threshold"]) {
+        event.check.output = "WARNING: Less than " + args["warning_threshold"].toString() + "% of selected events are OK (" + percentOK.toString() + "%)\n";
+        event.check.status = 1;
+        return event;
+    }
+
+    if (!!args["critical_count"]) {
+        crit = sensu.CountBySeverity("critical");
+
+        if (crit >= args["critical_count"]) {
+            event.check.output = "CRITICAL: " + args["critical_count"].toString() + " or more selected events are in a critical state (" + crit.toString() + ")\n";
+            event.check.status = 2;
+            return event;
+        }
+    }
+
+    if (!!args["warning_count"]) {
+        warn = sensu.CountBySeverity("warning");
+
+        if (warn >= args["warning_count"]) {
+            event.check.output = "WARNING: " + args["warning_count"].toString() + " or more selected events are in a warning state (" + warn.toString() + ")\n";
+            event.check.status = 1;
+            return event;
+        }
+    }
+
+    event.check.output = "Everything looks good (" + percentOK.toString() + "% OK)";
+    event.check.status = 0;
+
+    return event;
+---
+type: ServiceComponent
+api_version: bsm/v1
+metadata:
+  created_by: admin
+  name: bsmDemoComponent
+  namespace: default
+spec:
+  cron: ""
+  handlers: null
+  interval: 46
+  query:
+  - type: fieldSelector
+    value: event.entity.subscriptions matches "docker"
+  rules:
+  - arguments:
+      critical_threshold: 70
+      warning_count: 1
+    name: bsmDemoAggRule
+    template: aggregate
+  services:
+  - bsm-demo
+---
+type: Namespace
+api_version: core/v2
+metadata:
+  name: default
+spec:
+  name: default
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: admin
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - assets
+    - checks
+    - entities
+    - extensions
+    - events
+    - filters
+    - handlers
+    - hooks
+    - mutators
+    - silenced
+    - roles
+    - rolebindings
+    verbs:
+    - '*'
+  - resource_names: null
+    resources:
+    - namespaces
+    verbs:
+    - get
+    - list
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: cluster-admin
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - '*'
+    verbs:
+    - '*'
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: edit
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - assets
+    - checks
+    - entities
+    - extensions
+    - events
+    - filters
+    - handlers
+    - hooks
+    - mutators
+    - silenced
+    verbs:
+    - '*'
+  - resource_names: null
+    resources:
+    - namespaces
+    verbs:
+    - get
+    - list
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: system:agent
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - events
+    verbs:
+    - '*'
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: system:user
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - localselfuser
+    verbs:
+    - get
+    - update
+---
+type: ClusterRole
+api_version: core/v2
+metadata:
+  name: view
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - assets
+    - checks
+    - entities
+    - extensions
+    - events
+    - filters
+    - handlers
+    - hooks
+    - mutators
+    - silenced
+    - namespaces
+    verbs:
+    - get
+    - list
+---
+type: ClusterRoleBinding
+api_version: core/v2
+metadata:
+  name: cluster-admin
+spec:
+  role_ref:
+    name: cluster-admin
+    type: ClusterRole
+  subjects:
+  - name: cluster-admins
+    type: Group
+---
+type: ClusterRoleBinding
+api_version: core/v2
+metadata:
+  name: system:agent
+spec:
+  role_ref:
+    name: system:agent
+    type: ClusterRole
+  subjects:
+  - name: system:agents
+    type: Group
+---
+type: ClusterRoleBinding
+api_version: core/v2
+metadata:
+  name: system:user
+spec:
+  role_ref:
+    name: system:user
+    type: ClusterRole
+  subjects:
+  - name: system:users
+    type: Group
+---
+type: TessenConfig
+api_version: core/v2
+metadata: {}
+spec:
+  opt_out: false
+---
+type: CheckConfig
+api_version: core/v2
+metadata:
+  created_by: admin
+  name: bsmDemo
+  namespace: default
+spec:
+  check_hooks: null
+  command: echo "leggo my bsm"
+  env_vars: null
+  handlers: []
+  high_flap_threshold: 0
+  interval: 60
+  low_flap_threshold: 0
+  output_metric_format: ""
+  output_metric_handlers: null
+  proxy_entity_name: bsmProxy
+  publish: true
+  round_robin: false
+  runtime_assets: null
+  secrets: null
+  stdin: false
+  subdue: null
+  subscriptions:
+  - docker
+  timeout: 0
+  ttl: 0
+---
+type: Entity
+api_version: core/v2
+metadata:
+  created_by: admin
+  name: bsm-demo
+  namespace: default
+spec:
+  deregister: false
+  deregistration: {}
+  entity_class: service
+  last_seen: 0
+  sensu_agent_version: ""
+  subscriptions: null
+  system:
+    cloud_provider: ""
+    libc_type: ""
+    network:
+      interfaces: null
+    processes: null
+    vm_role: ""
+    vm_system: ""
+---
+type: Entity
+api_version: core/v2
+metadata:
+  name: bsmProxy
+  namespace: default
+spec:
+  deregister: false
+  deregistration: {}
+  entity_class: proxy
+  last_seen: 0
+  sensu_agent_version: ""
+  subscriptions:
+  - entity:bsmProxy
+  - docker
+  system:
+    cloud_provider: ""
+    libc_type: ""
+    network:
+      interfaces: null
+    processes: null
+    vm_role: ""
+    vm_system: ""
+---
+type: Entity
+api_version: core/v2
+metadata:
+  created_by: admin
+  name: demo2
+  namespace: default
+spec:
+  deregister: false
+  deregistration: {}
+  entity_class: service
+  last_seen: 0
+  sensu_agent_version: ""
+  subscriptions: null
+  system:
+    cloud_provider: ""
+    libc_type: ""
+    network:
+      interfaces: null
+    processes: null
+    vm_role: ""
+    vm_system: ""
+---
+type: Entity
+api_version: core/v2
+metadata:
+  name: sensu-agent
+  namespace: default
+spec:
+  deregister: false
+  deregistration: {}
+  entity_class: agent
+  last_seen: 1628889342
+  redact:
+  - password
+  - passwd
+  - pass
+  - api_key
+  - api_token
+  - access_key
+  - secret_key
+  - private_key
+  - secret
+  sensu_agent_version: 6.4.0
+  subscriptions:
+  - dev
+  - poller
+  - system
+  - linux
+  - docker
+  - entity:sensu-agent
+  system:
+    arch: amd64
+    cloud_provider: ""
+    hostname: sensu-agent
+    libc_type: musl
+    network:
+      interfaces:
+      - addresses:
+        - 127.0.0.1/8
+        name: lo
+      - addresses: null
+        name: tunl0
+      - addresses: null
+        name: ip6tnl0
+      - addresses:
+        - 172.19.0.5/16
+        mac: 02:42:ac:13:00:05
+        name: eth0
+    os: linux
+    platform: alpine
+    platform_family: alpine
+    platform_version: 3.12.7
+    processes: null
+    vm_role: guest
+    vm_system: docker
+  user: agent
+---
+type: Entity
+api_version: core/v2
+metadata:
+  name: sensu-rhel-agent
+  namespace: default
+spec:
+  deregister: true
+  deregistration: {}
+  entity_class: agent
+  last_seen: 1628889353
+  redact:
+  - password
+  - passwd
+  - pass
+  - api_key
+  - api_token
+  - access_key
+  - secret_key
+  - private_key
+  - secret
+  sensu_agent_version: 6.2.7
+  subscriptions:
+  - dev
+  - poller
+  - system
+  - linux
+  - docker
+  - entity:sensu-rhel-agent
+  system:
+    arch: amd64
+    cloud_provider: ""
+    hostname: sensu-rhel-agent
+    libc_type: glibc
+    network:
+      interfaces:
+      - addresses:
+        - 127.0.0.1/8
+        name: lo
+      - addresses: null
+        name: tunl0
+      - addresses: null
+        name: ip6tnl0
+      - addresses:
+        - 172.19.0.4/16
+        mac: 02:42:ac:13:00:04
+        name: eth0
+    os: linux
+    platform: redhat
+    platform_family: rhel
+    platform_version: "7.9"
+    processes: null
+    vm_role: guest
+    vm_system: docker
+  user: agent
+---
+type: Role
+api_version: core/v2
+metadata:
+  name: system:pipeline
+  namespace: default
+spec:
+  rules:
+  - resource_names: null
+    resources:
+    - events
+    verbs:
+    - get
+    - list
+---
+type: RoleBinding
+api_version: core/v2
+metadata:
+  name: system:pipeline
+  namespace: default
+spec:
+  role_ref:
+    name: system:pipeline
+    type: Role
+  subjects:
+  - name: system:pipeline
+    type: Group
